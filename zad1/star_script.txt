@@ -1,0 +1,226 @@
+-- Очистка (если есть старые таблицы)
+DROP TABLE IF EXISTS fact_sales CASCADE;
+DROP TABLE IF EXISTS dim_customer CASCADE;
+DROP TABLE IF EXISTS dim_product CASCADE;
+DROP TABLE IF EXISTS dim_date CASCADE;
+DROP TABLE IF EXISTS dim_location CASCADE;
+DROP TABLE IF EXISTS staging_raw CASCADE;
+
+-- ИЗМЕРЕНИЕ 1: Клиенты
+CREATE TABLE dim_customer (
+    customer_sk SERIAL PRIMARY KEY,
+    customer_id VARCHAR(20) UNIQUE NOT NULL,
+    customer_name VARCHAR(100),
+    segment VARCHAR(50)
+);
+
+-- ИЗМЕРЕНИЕ 2: Продукты
+CREATE TABLE dim_product (
+    product_sk SERIAL PRIMARY KEY,
+    product_id VARCHAR(20) UNIQUE NOT NULL,
+    category VARCHAR(50),
+    sub_category VARCHAR(100),
+    product_name VARCHAR(255)
+);
+
+-- ИЗМЕРЕНИЕ 3: Даты
+CREATE TABLE dim_date (
+    date_sk SERIAL PRIMARY KEY,
+    full_date DATE UNIQUE NOT NULL,
+    year INTEGER,
+    month INTEGER,
+    quarter INTEGER,
+    day_of_month INTEGER,
+    day_name VARCHAR(20)
+);
+
+-- ИЗМЕРЕНИЕ 4: География
+CREATE TABLE dim_location (
+    location_sk SERIAL PRIMARY KEY,
+    region VARCHAR(50),
+    state VARCHAR(50),
+    city VARCHAR(50),
+    postal_code INTEGER
+);
+
+-- ТАБЛИЦА ФАКТОВ (центр схемы "Звезда")
+CREATE TABLE fact_sales (
+    sales_sk SERIAL PRIMARY KEY,
+    customer_sk INTEGER REFERENCES dim_customer(customer_sk),
+    product_sk INTEGER REFERENCES dim_product(product_sk),
+    order_date_sk INTEGER REFERENCES dim_date(date_sk),
+    ship_date_sk INTEGER REFERENCES dim_date(date_sk),
+    location_sk INTEGER REFERENCES dim_location(location_sk),
+    order_id VARCHAR(20),
+    ship_mode VARCHAR(50),
+    sales DECIMAL(10,2),
+    quantity INTEGER,
+    discount DECIMAL(5,2),
+    profit DECIMAL(10,2)
+);
+
+-- Индексы для скорости запросов
+CREATE INDEX idx_fact_customer ON fact_sales(customer_sk);
+CREATE INDEX idx_fact_product ON fact_sales(product_sk);
+CREATE INDEX idx_fact_dates ON fact_sales(order_date_sk, ship_date_sk);
+CREATE INDEX idx_fact_location ON fact_sales(location_sk);
+
+
+DROP TABLE IF EXISTS staging_raw CASCADE;
+-- Staging таблица для сырого CSV
+
+CREATE TABLE staging_raw (
+    "Row ID" INTEGER,
+    "Order ID" VARCHAR(20),
+    "Order Date" TEXT,        
+    "Ship Date" TEXT,         
+    "Ship Mode" VARCHAR(50),
+    "Customer ID" VARCHAR(20),
+    "Customer Name" VARCHAR(100),
+    "Segment" VARCHAR(50),
+    "Country" VARCHAR(50),
+    "City" VARCHAR(100),
+    "State" VARCHAR(50),
+    "Postal Code" INTEGER,
+    "Region" VARCHAR(50),
+    "Product ID" VARCHAR(20),
+    "Category" VARCHAR(50),
+    "Sub-Category" VARCHAR(100),
+    "Product Name" VARCHAR(255),
+    "Sales" DECIMAL(10,2),
+    "Quantity" INTEGER,
+    "Discount" DECIMAL(5,2),
+    "Profit" DECIMAL(10,2)
+);
+
+
+select Count(*) from staging_raw sr;
+
+select * from staging_raw sr 
+limit 10;
+
+-- Конвертируйте TEXT → нужные типы
+ALTER TABLE staging_raw 
+ADD COLUMN order_date DATE,
+ADD COLUMN ship_date DATE,
+ADD COLUMN sales_num DECIMAL(10,2),
+ADD COLUMN quantity_num INTEGER,
+ADD COLUMN discount_num DECIMAL(5,2),
+ADD COLUMN profit_num DECIMAL(10,2);
+
+UPDATE staging_raw 
+SET 
+    order_date = TO_DATE("Order Date", 'MM/DD/YYYY'),
+    ship_date = TO_DATE("Ship Date", 'MM/DD/YYYY'),
+    sales_num = "Sales"::DECIMAL,
+    quantity_num = "Quantity"::INTEGER,
+    discount_num = "Discount"::DECIMAL,
+    profit_num = "Profit"::DECIMAL;
+
+-- заполнение данными схемы "Звезда"
+--  ИЗМЕРЕНИЕ 1: Клиенты (SCD Type 1)
+INSERT INTO dim_customer (customer_id, customer_name, segment)
+SELECT DISTINCT "Customer ID", "Customer Name", "Segment"
+FROM staging_raw
+ON CONFLICT (customer_id) 
+DO UPDATE SET 
+    customer_name = EXCLUDED.customer_name,
+    segment = EXCLUDED.segment;
+
+-- ИЗМЕРЕНИЕ 2: Продукты
+-- ИЗМЕРЕНИЕ 2: Продукты (исправленная версия)
+INSERT INTO dim_product (product_id, category, sub_category, product_name)
+SELECT DISTINCT "Product ID", "Category", "Sub-Category", "Product Name"
+FROM staging_raw
+ON CONFLICT (product_id) 
+DO NOTHING;
+
+-- ИЗМЕРЕНИЕ 4: География (Region+State+City = уникальный ключ)
+INSERT INTO dim_location (region, state, city, postal_code)
+SELECT DISTINCT "Region", "State", "City", "Postal Code"
+FROM staging_raw
+ON CONFLICT DO NOTHING;
+
+-- ИЗМЕРЕНИЕ 3: Даты (все уникальные Order Date + Ship Date)
+INSERT INTO dim_date (full_date, year, month, quarter, day_of_month, day_name)
+SELECT DISTINCT 
+    full_date,
+    EXTRACT(YEAR FROM full_date)::INTEGER as year,
+    EXTRACT(MONTH FROM full_date)::INTEGER as month,
+    EXTRACT(QUARTER FROM full_date)::INTEGER as quarter,
+    EXTRACT(DAY FROM full_date)::INTEGER as day_of_month,
+    TO_CHAR(full_date, 'Day') as day_name
+FROM (
+    SELECT order_date AS full_date FROM staging_raw WHERE order_date IS NOT NULL
+    UNION
+    SELECT ship_date FROM staging_raw WHERE ship_date IS NOT NULL
+) all_dates
+ON CONFLICT (full_date) DO NOTHING;
+
+-- ТАБЛИЦА ФАКТОВ: Продажи
+INSERT INTO fact_sales (
+    customer_sk, product_sk, order_date_sk, ship_date_sk, location_sk,
+    order_id, ship_mode, sales, quantity, discount, profit
+)
+SELECT 
+    dc.customer_sk,
+    dp.product_sk,
+    od.date_sk AS order_date_sk,
+    sd.date_sk AS ship_date_sk,
+    dl.location_sk,
+    sr."Order ID",
+    sr."Ship Mode",
+    sr.sales_num,
+    sr.quantity_num,
+    sr.discount_num,
+    sr.profit_num
+FROM staging_raw sr
+-- ★ JOIN по схеме "Звезда" ★
+JOIN dim_customer dc ON dc.customer_id = sr."Customer ID"
+JOIN dim_product dp ON dp.product_id = sr."Product ID"
+JOIN dim_date od ON od.full_date = sr.order_date
+JOIN dim_date sd ON sd.full_date = sr.ship_date
+JOIN dim_location dl ON (
+    dl.region = sr."Region" 
+    AND dl.state = sr."State" 
+    AND dl.city = sr."City"
+);
+
+-- Количество строк в каждой таблице
+SELECT 
+    'fact_sales' as table_name, COUNT(*)::BIGINT as rows 
+FROM fact_sales 
+UNION ALL
+SELECT 'dim_customer', COUNT(*)::BIGINT FROM dim_customer 
+UNION ALL
+SELECT 'dim_product', COUNT(*)::BIGINT FROM dim_product 
+UNION ALL
+SELECT 'dim_date', COUNT(*)::BIGINT FROM dim_date 
+UNION ALL
+SELECT 'dim_location', COUNT(*)::BIGINT FROM dim_location 
+ORDER BY table_name;
+
+-- Ключевые показатели из таблицы фактов
+SELECT 
+    SUM(sales) as total_sales,
+    SUM(quantity) as total_quantity,
+    SUM(profit) as total_profit,
+    COUNT(DISTINCT order_id) as unique_orders,
+    ROUND(AVG(profit/sales)*100, 2) as avg_profit_margin_pct
+FROM fact_sales;
+
+-- Пример: Продажи по сегментам и категориям продуктов
+SELECT 
+    dc.segment,
+    dp.category,
+    dd.year,
+    COUNT(*) as order_count,
+    SUM(fs.sales) as total_sales,
+    SUM(fs.profit) as total_profit
+FROM fact_sales fs
+JOIN dim_customer dc ON fs.customer_sk = dc.customer_sk
+JOIN dim_product dp ON fs.product_sk = dp.product_sk
+JOIN dim_date dd ON fs.order_date_sk = dd.date_sk
+GROUP BY dc.segment, dp.category, dd.year
+ORDER BY total_sales DESC
+LIMIT 10;

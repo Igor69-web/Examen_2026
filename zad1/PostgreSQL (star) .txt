@@ -1,0 +1,112 @@
+1) папка superstore
+2) запуск контейнера через терминал
+docker run -d \
+  --name superstore_pg \
+  -e POSTGRES_DB=superstore \
+  -e POSTGRES_USER=admin \
+  -e POSTGRES_PASSWORD=password123 \
+  -p 5432:5432 \
+  -v $PWD/postgres_data:/var/lib/postgresql/data \
+  postgres:16
+3) подключение к базе данных через терминал
+docker exec -it superstore_pg psql -U admin -d superstore
+
+4) создание таблиц
+-- Очистка (если есть старые таблицы)
+DROP TABLE IF EXISTS fact_sales CASCADE;
+DROP TABLE IF EXISTS dim_customer CASCADE;
+DROP TABLE IF EXISTS dim_product CASCADE;
+DROP TABLE IF EXISTS dim_date CASCADE;
+DROP TABLE IF EXISTS dim_location CASCADE;
+DROP TABLE IF EXISTS staging_raw CASCADE;
+
+-- ИЗМЕРЕНИЕ 1: Клиенты
+CREATE TABLE dim_customer (
+    customer_sk SERIAL PRIMARY KEY,
+    customer_id VARCHAR(20) UNIQUE NOT NULL,
+    customer_name VARCHAR(100),
+    segment VARCHAR(50)
+);
+
+-- ИЗМЕРЕНИЕ 2: Продукты
+CREATE TABLE dim_product (
+    product_sk SERIAL PRIMARY KEY,
+    product_id VARCHAR(20) UNIQUE NOT NULL,
+    category VARCHAR(50),
+    sub_category VARCHAR(100),
+    product_name VARCHAR(255)
+);
+
+-- ИЗМЕРЕНИЕ 3: Даты
+CREATE TABLE dim_date (
+    date_sk SERIAL PRIMARY KEY,
+    full_date DATE UNIQUE NOT NULL,
+    year INTEGER,
+    month INTEGER,
+    quarter INTEGER,
+    day_of_month INTEGER,
+    day_name VARCHAR(20)
+);
+
+-- ИЗМЕРЕНИЕ 4: География
+CREATE TABLE dim_location (
+    location_sk SERIAL PRIMARY KEY,
+    region VARCHAR(50),
+    state VARCHAR(50),
+    city VARCHAR(50),
+    postal_code INTEGER
+);
+
+-- ТАБЛИЦА ФАКТОВ (центр схемы "Звезда")
+CREATE TABLE fact_sales (
+    sales_sk SERIAL PRIMARY KEY,
+    customer_sk INTEGER REFERENCES dim_customer(customer_sk),
+    product_sk INTEGER REFERENCES dim_product(product_sk),
+    order_date_sk INTEGER REFERENCES dim_date(date_sk),
+    ship_date_sk INTEGER REFERENCES dim_date(date_sk),
+    location_sk INTEGER REFERENCES dim_location(location_sk),
+    order_id VARCHAR(20),
+    ship_mode VARCHAR(50),
+    sales DECIMAL(10,2),
+    quantity INTEGER,
+    discount DECIMAL(5,2),
+    profit DECIMAL(10,2)
+);
+
+-- Индексы для скорости запросов
+CREATE INDEX idx_fact_customer ON fact_sales(customer_sk);
+CREATE INDEX idx_fact_product ON fact_sales(product_sk);
+CREATE INDEX idx_fact_dates ON fact_sales(order_date_sk, ship_date_sk);
+CREATE INDEX idx_fact_location ON fact_sales(location_sk);
+
+
+DROP TABLE IF EXISTS staging_raw CASCADE;
+-- Staging таблица для сырого CSV
+
+CREATE TABLE staging_raw (
+    "Row ID" INTEGER,
+    "Order ID" VARCHAR(20),
+    "Order Date" TEXT,        
+    "Ship Date" TEXT,         
+    "Ship Mode" VARCHAR(50),
+    "Customer ID" VARCHAR(20),
+    "Customer Name" VARCHAR(100),
+    "Segment" VARCHAR(50),
+    "Country" VARCHAR(50),
+    "City" VARCHAR(100),
+    "State" VARCHAR(50),
+    "Postal Code" INTEGER,
+    "Region" VARCHAR(50),
+    "Product ID" VARCHAR(20),
+    "Category" VARCHAR(50),
+    "Sub-Category" VARCHAR(100),
+    "Product Name" VARCHAR(255),
+    "Sales" DECIMAL(10,2),
+    "Quantity" INTEGER,
+    "Discount" DECIMAL(5,2),
+    "Profit" DECIMAL(10,2)
+);
+
+5) загрузила данные в таблицу с сырыми данными черех импорт данных в dbeaver
+
+6) скрипт - create_table_star
