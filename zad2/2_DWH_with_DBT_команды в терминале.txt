@@ -1,0 +1,228 @@
+1. Создаём проект mkdir superstore
+2. cd superstore
+3. поднимаем контейнер с postgre sql
+docker run -d \
+  --name superstore_pg \
+  -e POSTGRES_DB=superstore \
+  -e POSTGRES_USER=admin \
+  -e POSTGRES_PASSWORD=password123 \
+  -p 5432:5432 \
+  -v $PWD/postgres_data:/var/lib/postgresql/data \
+  postgres:16
+4. проверяем запуск docker ps
+5. подключаемся через dbeaver:
+хост: localhost
+порт: 5432
+база данных: superstore
+пользователь: admin
+пароль: password123
+6. создаём таблицу staging_raw
+CREATE TABLE staging_raw (
+    "Row ID" INTEGER,
+    "Order ID" VARCHAR(20),
+    "Order Date" TEXT,        
+    "Ship Date" TEXT,         
+    "Ship Mode" VARCHAR(50),
+    "Customer ID" VARCHAR(20),
+    "Customer Name" VARCHAR(100),
+    "Segment" VARCHAR(50),
+    "Country" VARCHAR(50),
+    "City" VARCHAR(100),
+    "State" VARCHAR(50),
+    "Postal Code" INTEGER,
+    "Region" VARCHAR(50),
+    "Product ID" VARCHAR(20),
+    "Category" VARCHAR(50),
+    "Sub-Category" VARCHAR(100),
+    "Product Name" VARCHAR(255),
+    "Sales" DECIMAL(10,2),
+    "Quantity" INTEGER,
+    "Discount" DECIMAL(5,2),
+    "Profit" DECIMAL(10,2)
+);
+7. загружаем данные с помощью импорта
+8. обрабатываем таблицу
+-- Конвертируйте TEXT → нужные типы
+ALTER TABLE staging_raw 
+ADD COLUMN order_date DATE,
+ADD COLUMN ship_date DATE,
+ADD COLUMN sales_num DECIMAL(10,2),
+ADD COLUMN quantity_num INTEGER,
+ADD COLUMN discount_num DECIMAL(5,2),
+ADD COLUMN profit_num DECIMAL(10,2);
+
+UPDATE staging_raw 
+SET 
+    order_date = TO_DATE("Order Date", 'MM/DD/YYYY'),
+    ship_date = TO_DATE("Ship Date", 'MM/DD/YYYY'),
+    sales_num = "Sales"::DECIMAL,
+    quantity_num = "Quantity"::INTEGER,
+    discount_num = "Discount"::DECIMAL,
+    profit_num = "Profit"::DECIMAL;
+5. Установите python3-venv (если нет)
+sudo apt update
+sudo apt install python3-venv python3-full
+6. Создайте виртуальное окружение для dbt
+python3 -m venv dbt_env
+7. Активируйте окружение
+source dbt_env/bin/activate
+8. Обновите pip и установите dbt-postgres
+pip install --upgrade pip
+pip install dbt-postgres
+9. Проверьте установку
+dbt --version
+10. продолжаем работу в окружении
+# Инициализация проекта
+dbt init superstore_dbt
+1) Enter a number: 1
+2) Which database would you like to use? [1] postgres
+Enter a number: 1
+3) Enter a number: 1
+host (hostname for the instance): localhost
+port [5432]: 
+user (dev username): admin
+pass (dev password): password123
+dbname (default database that dbt will build objects in): superstore
+schema (default schema that dbt will build objects in): dbt_superstore
+threads (1 or more) [1]: 1
+11. cd superstore_dbt
+12. (dbt_env) kate@beady:~/superstore/superstore_dbt$ dbt debug
+
+-- должно отобразится All checks passed!
+
+===если вы вышли из виртуального окружения==
+нужна директория superstore
+выполняем команду source dbt_env/bin/activate
+возвращаемся на шаг 11
+
+13. если всё ок и отобразилось, что всё гуд
+создаём структуру папок, в терминале должно быть такая директория (dbt_env) kate@beady:~/superstore/superstore_dbt$
+
+mkdir -p models/{staging,intermediate,marts}
+touch models/schema.yml models/sources.yml
+
+14. в sources.yml пишем:
+version: 2
+sources:
+  - name: raw_data
+    schema: public
+    tables:
+      - name: staging_raw
+
+15. в папке models/staging создаём файл stg_superstore.sql и пишем:
+{{ config(materialized='view') }}
+
+SELECT 
+    "Customer ID" as customer_id,
+    "Order ID" as order_id,
+    TO_DATE("Order Date", 'MM/DD/YYYY') as order_date,
+    TO_DATE("Ship Date", 'MM/DD/YYYY') as ship_date,
+    "Sales"::DECIMAL(10,2) as sales,
+    "Profit"::DECIMAL(10,2) as profit,
+    "Segment" as segment,
+    "Region" as region,
+    "Quantity"::INTEGER as quantity
+FROM {{ source('raw_data', 'staging_raw') }}
+WHERE "Sales" > 0
+
+16. в папке models/intermediate создаём файл int_customer_lifetime.sql и пишем: 
+{{ config(materialized='table') }}
+
+SELECT 
+    customer_id,
+    segment,
+    COUNT(DISTINCT order_id) as total_orders,
+    SUM(sales) as total_revenue,
+    SUM(profit) as total_profit,
+    MIN(order_date) as first_order_date,
+    MAX(order_date) as last_order_date
+FROM {{ ref('stg_superstore') }}
+GROUP BY customer_id, segment
+
+17. в папке models/marts создаём файл mart_valuable_dormant_customers.sql и пишем:
+{{ config(materialized='table') }}
+
+WITH customer_metrics AS (
+    SELECT 
+        *,
+        CURRENT_DATE - last_order_date as days_since_last_order,
+        total_revenue >= (
+            SELECT percentile_cont(0.8) WITHIN GROUP (ORDER BY total_revenue)
+            FROM {{ ref('int_customer_lifetime') }}
+        ) as is_valuable_customer
+    FROM {{ ref('int_customer_lifetime') }}
+)
+
+SELECT 
+    customer_id,
+    segment,
+    total_revenue,
+    total_profit,
+    total_orders,
+    first_order_date,
+    last_order_date,
+    days_since_last_order,
+    CASE 
+        WHEN is_valuable_customer AND days_since_last_order > 90 
+        THEN 'Спящий ценный клиент'
+        WHEN is_valuable_customer 
+        THEN 'Активный ценный клиент'
+        ELSE 'Неценный'
+    END as customer_status
+FROM customer_metrics
+WHERE is_valuable_customer = true
+
+18. в папке models находим файл schema.yml и пишем: 
+version: 2
+
+models:
+  - name: stg_superstore
+    description: "Staging: очищенные сырые данные Superstore"
+    columns:
+      - name: customer_id
+        tests:
+          - not_null
+      - name: sales
+        tests:
+          - accepted_values:
+              values: ['> 0']  
+
+  - name: mart_valuable_dormant_customers
+    description: "Mart: витрина спящих ценных клиентов"
+    columns:
+      - name: customer_id
+        tests:
+          - unique
+          - not_null
+      - name: total_revenue
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: total_revenue > 1000  
+
+
+Запуск pipeline:
+# 1. Компиляция (проверка SQL)
+dbt compile
+
+если ошибка, то в директории (dbt_env) kate@beady:~/superstore/superstore_dbt$ выполняем nano packages.yml
+
+вносим и сохраняем
+packages:
+  - package: dbt-labs/dbt_utils
+    version: 1.3.3
+
+далее выполняем dbt deps
+должно отобразится Up to date!
+
+# 2. Выполните модели
+dbt run
+
+# 3. Тесты качества
+dbt test, у меня были ошибки, показало так Done. PASS=6 WARN=0 ERROR=3 SKIP=0 NO-OP=0 TOTAL=9 это норм
+
+# 4. Граф зависимостей 
+dbt docs generate
+dbt docs serve  # http://localhost:8080
+
+для того, чтобы показать граф: 
+жмём на синий кружок с графом
