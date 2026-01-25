@@ -1,0 +1,11 @@
+test_project:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: localhost
+      user: postgres
+      pass: postgres
+      port: 5432
+      dbname: postgres
+      schema: public
