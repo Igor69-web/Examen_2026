@@ -1,0 +1,7 @@
+1) выдать права chmod -R 755 airflow/dags (если вы папке airflow. Там просто есть еще airflow где yml лежит. Тогда нужно chmod -R 755 dags) В общем попробуйте два раза так сделать.
+2) Полная очистка 
+docker compose down --volumes --remove-orphans
+docker compose up airflow-init
+docker compose up -d
+
+После этого должно появится. Ошибка была из-за рассинхрона БД и webserver
